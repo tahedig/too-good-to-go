@@ -15,13 +15,10 @@ import (
 	"github.com/tahedig/too-good-to-go/backend/pkg/logger"
 )
 
-// version is overridden at build time:
-// go build -ldflags "-X main.version=v0.1.0" ./cmd/api
 var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		// Even startup failures are logged as JSON.
 		logger.New("error", os.Stderr).Error("server exited with error", "error", err.Error())
 		os.Exit(1)
 	}

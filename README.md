@@ -19,8 +19,10 @@ server starts without any setup. To override values locally:
 cp .env.example .env     # Windows: copy .env.example .env
 ```
 
-Real environment variables always take precedence over `.env`. Invalid values
-(e.g. `HTTP_PORT=abc`) stop startup with an error listing every bad variable.
+Real environment variables always take precedence over `.env`. The `.env` file
+is parsed by `godotenv`; application-specific types and constraints are then
+validated by the config loader. Invalid values (e.g. `HTTP_PORT=abc`) stop
+startup with an error listing every bad variable.
 
 Check it is up:
 
@@ -32,6 +34,13 @@ Run tests:
 
 ```bash
 go test ./...
+```
+
+The dependency graph is generated with Google Wire. After changing providers in
+`internal/injector/wire.go`, regenerate the checked-in implementation with:
+
+```bash
+go generate ./internal/injector
 ```
 
 Build a binary with a version stamp:
@@ -141,7 +150,7 @@ internal/
   application/            DTOs, service interfaces and implementations, workers
   infrastructure/         Postgres/Redis repositories, storage, realtime, ...
   presentation/           handlers, middleware, router
-  injector/               dependency wiring
+  injector/               Wire injector and generated dependency wiring
 pkg/                      reusable helpers with no project dependencies (logger, ...)
 docs/                     Swagger output
 ```

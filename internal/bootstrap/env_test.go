@@ -44,6 +44,35 @@ func TestLoadConfigReportsAllInvalidValues(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesDefaultsForEmptyDotEnvValues(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, key := range []string{"APP_ENV", "LOG_LEVEL"} {
+		value, exists := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if exists {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("APP_ENV=\nLOG_LEVEL=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppEnv != EnvDevelopment || cfg.LogLevel != "info" {
+		t.Fatalf("empty values should use defaults, got env=%q log level=%q", cfg.AppEnv, cfg.LogLevel)
+	}
+}
+
 func TestDotEnvDoesNotOverrideRealEnv(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -65,5 +94,18 @@ func TestDotEnvDoesNotOverrideRealEnv(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" || cfg.AppEnv != EnvStaging {
 		t.Errorf(".env values not applied: %+v", cfg)
+	}
+}
+
+func TestLoadConfigReportsMalformedDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("not-an-assignment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), ".env") {
+		t.Fatalf("expected a .env parsing error, got %v", err)
 	}
 }

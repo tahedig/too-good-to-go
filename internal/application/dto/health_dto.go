@@ -15,8 +15,6 @@ type HealthResponse struct {
 	Checks    map[string]HealthCheckResult `json:"checks,omitempty"`
 }
 
-// HealthCheckResult deliberately has no error text: /health is public, so
-// failure reasons are logged server side instead of exposed.
 type HealthCheckResult struct {
 	Status    string `json:"status"`
 	LatencyMS int64  `json:"latency_ms"`
