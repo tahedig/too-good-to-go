@@ -10,7 +10,11 @@ const (
 	HeaderRequestID = "X-Request-ID"
 
 	CtxKeyRequestID = "request_id"
-	CtxKeyUserID    = "user_id" // set by the JWT middleware once auth exists
+	CtxKeyUserID    = "user_id" // set by the JWT auth middleware
+	CtxKeyUserRole  = "user_role"
 
-	HealthPath = "/health"
+	HealthPath  = "/health"
+	SwaggerPath = "/swagger"
+
+	SMSProviderFake = "fake"
 )

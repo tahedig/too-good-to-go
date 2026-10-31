@@ -1,0 +1,6 @@
+# Keep LF in the repository and working tree on every OS so gofmt and CI see
+# the same bytes (gofmt reports CRLF files as unformatted).
+* text=auto eol=lf
+*.go text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
