@@ -1,3 +1,18 @@
+// Package main is the API entrypoint.
+//
+// The comments below are the general Swagger info; run `make swagger` after
+// changing them or any handler annotation.
+//
+//	@title						Too Good To Go API
+//	@version					0.1
+//	@description				Backend API. Every error uses the same body: {"error": {"code", "message", "details", "request_id"}}. Clients should switch on error.code.
+//	@BasePath					/
+//	@schemes					http https
+//
+//	@securityDefinitions.apikey	BearerAuth
+//	@in							header
+//	@name						Authorization
+//	@description				Enter "Bearer " followed by the access_token from /auth/otp/verify, e.g. "Bearer eyJhbGci..."
 package main
 
 import (
@@ -44,6 +59,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Runs after srv.Shutdown below, once no request can use the connections.
+	defer func() {
+		if err := app.Close(); err != nil {
+			log.Warn("closing dependencies failed", "error", err.Error())
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),

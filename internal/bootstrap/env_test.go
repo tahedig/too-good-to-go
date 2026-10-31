@@ -10,7 +10,8 @@ import (
 
 func TestLoadConfigDefaults(t *testing.T) {
 	t.Chdir(t.TempDir()) // no .env file here
-	for _, k := range []string{"APP_ENV", "HTTP_PORT", "LOG_LEVEL", "HTTP_READ_TIMEOUT", "TRUSTED_PROXIES"} {
+	for _, k := range []string{"APP_ENV", "HTTP_PORT", "LOG_LEVEL", "HTTP_READ_TIMEOUT", "TRUSTED_PROXIES",
+		"OTP_RESEND_COOLDOWN", "HTTP_MAX_BODY_BYTES", "AUTH_RATE_LIMIT", "AUTH_RATE_WINDOW", "SWAGGER_ENABLED"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -24,6 +25,73 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.HTTPReadTimeout != 10*time.Second {
 		t.Fatalf("unexpected read timeout: %v", cfg.HTTPReadTimeout)
+	}
+	if !cfg.SwaggerEnabled {
+		t.Fatal("swagger should be on by default in development")
+	}
+	if cfg.OTPResendCooldown != time.Minute || cfg.HTTPMaxBodyBytes != 1<<20 ||
+		cfg.AuthRateLimit != 20 || cfg.AuthRateWindow != time.Minute {
+		t.Fatalf("unexpected abuse-protection defaults: %+v", cfg)
+	}
+}
+
+func TestJWTSecretRules(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, k := range []string{"APP_ENV", "JWT_SECRET", "ADMIN_PHONES", "REDIS_URL", "OTP_EXPOSE_CODE", "SWAGGER_ENABLED"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+
+	cfg, err := LoadConfig() // development: an ephemeral secret is generated
+	if err != nil || len(cfg.JWTSecret) < minJWTSecretLen {
+		t.Fatalf("development should get a generated secret, err=%v", err)
+	}
+
+	t.Setenv("APP_ENV", "production")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "JWT_SECRET") {
+		t.Fatalf("production without JWT_SECRET must fail, got %v", err)
+	}
+
+	t.Setenv("JWT_SECRET", "too-short")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "JWT_SECRET") {
+		t.Fatalf("short JWT_SECRET must fail, got %v", err)
+	}
+
+	t.Setenv("JWT_SECRET", strings.Repeat("k", 40))
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
+		t.Fatalf("production without REDIS_URL must fail, got %v", err)
+	}
+	t.Setenv("REDIS_URL", "redis://localhost:6379/0")
+	t.Setenv("ADMIN_PHONES", "09121234567, +989129999999")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AdminPhones) != 2 || cfg.AdminPhones[0] != "+989121234567" {
+		t.Fatalf("admin phones not normalized: %v", cfg.AdminPhones)
+	}
+
+	t.Setenv("ADMIN_PHONES", "nope")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "ADMIN_PHONES") {
+		t.Fatalf("invalid ADMIN_PHONES must fail, got %v", err)
+	}
+	t.Setenv("ADMIN_PHONES", "")
+
+	if cfg, err := LoadConfig(); err != nil || cfg.SwaggerEnabled {
+		t.Fatalf("swagger should be off by default in production, err=%v", err)
+	}
+
+	t.Setenv("OTP_EXPOSE_CODE", "true")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "OTP_EXPOSE_CODE") {
+		t.Fatalf("OTP_EXPOSE_CODE in production must fail, got %v", err)
+	}
+	t.Setenv("APP_ENV", "staging")
+	if cfg, err := LoadConfig(); err != nil || !cfg.OTPExposeCode {
+		t.Fatalf("OTP_EXPOSE_CODE should be allowed in staging, err=%v", err)
+	}
+	t.Setenv("OTP_EXPOSE_CODE", "maybe")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "OTP_EXPOSE_CODE") {
+		t.Fatalf("non-boolean OTP_EXPOSE_CODE must fail, got %v", err)
 	}
 }
 
@@ -52,6 +120,8 @@ func TestDotEnvDoesNotOverrideRealEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HTTP_PORT", "7000") // real env wins
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	t.Setenv("REDIS_URL", "redis://localhost:6379/0") // .env sets APP_ENV=staging
 	os.Unsetenv("LOG_LEVEL")
 	os.Unsetenv("APP_ENV")
 	t.Cleanup(func() { os.Unsetenv("LOG_LEVEL"); os.Unsetenv("APP_ENV") })

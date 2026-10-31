@@ -2,6 +2,8 @@ package bootstrap
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tahedig/too-good-to-go/backend/pkg/validation"
 )
 
 // Config holds every environment specific value. It is built only from
@@ -23,10 +27,51 @@ type Config struct {
 	HTTPWriteTimeout    time.Duration
 	HTTPIdleTimeout     time.Duration
 	HTTPShutdownTimeout time.Duration
+	// HTTPMaxBodyBytes caps request bodies; larger ones get 413.
+	HTTPMaxBodyBytes int64
 
 	HealthCheckTimeout time.Duration
 
 	LogLevel string
+
+	OTPLength      int
+	OTPTTL         time.Duration
+	OTPMaxAttempts int
+	// OTPResendCooldown is the minimum gap between two codes for one phone.
+	OTPResendCooldown time.Duration
+	// OTPExposeCode returns the generated code in the /auth/otp/request
+	// response so the flow can be tested end to end while SMS delivery is
+	// faked. Refused when APP_ENV is production.
+	OTPExposeCode bool
+	// SMSProvider selects the SMS implementation; only "fake" exists for now.
+	SMSProvider string
+
+	// JWTSecret signs access tokens (HS256). Required outside development;
+	// in development an ephemeral random secret is generated when unset.
+	JWTSecret    string
+	JWTIssuer    string
+	JWTAccessTTL time.Duration
+
+	// AuthRateLimit requests per AuthRateWindow are allowed per client IP on
+	// the /auth/otp endpoints.
+	AuthRateLimit  int
+	AuthRateWindow time.Duration
+
+	// AdminPhones and VendorPhones (E.164) get that role when they log in for
+	// the first time; every other new user is a customer.
+	AdminPhones  []string
+	VendorPhones []string
+
+	// RedisURL (redis://[:password@]host:port/db) stores OTPs and rate-limit
+	// counters. Required outside development; when empty in development
+	// they are kept in process memory.
+	RedisURL string
+	// RedisKeyPrefix namespaces every key, so environments can share a Redis.
+	RedisKeyPrefix string
+
+	// SwaggerEnabled serves Swagger UI at /swagger/index.html. Defaults to
+	// true everywhere except production.
+	SwaggerEnabled bool
 
 	// TrustedProxies is the list of proxy IPs/CIDRs allowed to set
 	// X-Forwarded-For. Empty means no proxy is trusted.
@@ -57,9 +102,33 @@ func LoadConfig() (*Config, error) {
 		HTTPWriteTimeout:    p.duration("HTTP_WRITE_TIMEOUT", 15*time.Second),
 		HTTPIdleTimeout:     p.duration("HTTP_IDLE_TIMEOUT", 60*time.Second),
 		HTTPShutdownTimeout: p.duration("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second),
+		HTTPMaxBodyBytes:    int64(p.intRange("HTTP_MAX_BODY_BYTES", 1<<20, 1<<10, 64<<20)),
 		HealthCheckTimeout:  p.duration("HEALTH_CHECK_TIMEOUT", 2*time.Second),
 		LogLevel:            p.oneOf("LOG_LEVEL", "info", "debug", "info", "warn", "error"),
+		OTPLength:           p.intRange("OTP_LENGTH", 6, 4, 8),
+		OTPTTL:              p.duration("OTP_TTL", 5*time.Minute),
+		OTPMaxAttempts:      p.intRange("OTP_MAX_ATTEMPTS", 5, 1, 20),
+		OTPResendCooldown:   p.duration("OTP_RESEND_COOLDOWN", time.Minute),
+		OTPExposeCode:       p.bool("OTP_EXPOSE_CODE", false),
+		SMSProvider:         p.oneOf("SMS_PROVIDER", SMSProviderFake, SMSProviderFake),
+		JWTSecret:           p.string("JWT_SECRET", ""),
+		JWTIssuer:           p.string("JWT_ISSUER", AppName),
+		JWTAccessTTL:        p.duration("JWT_ACCESS_TTL", time.Hour),
+		AuthRateLimit:       p.intRange("AUTH_RATE_LIMIT", 20, 1, 10000),
+		AuthRateWindow:      p.duration("AUTH_RATE_WINDOW", time.Minute),
+		AdminPhones:         p.phones("ADMIN_PHONES"),
+		VendorPhones:        p.phones("VENDOR_PHONES"),
+		RedisURL:            p.string("REDIS_URL", ""),
+		RedisKeyPrefix:      p.string("REDIS_KEY_PREFIX", "tgtg:"),
 		TrustedProxies:      p.list("TRUSTED_PROXIES"),
+	}
+	cfg.SwaggerEnabled = p.bool("SWAGGER_ENABLED", !cfg.IsProduction())
+	p.jwtSecret(cfg)
+	if cfg.RedisURL == "" && cfg.AppEnv != EnvDevelopment {
+		p.errs = append(p.errs, errors.New("REDIS_URL is required when APP_ENV is not development"))
+	}
+	if cfg.OTPExposeCode && cfg.IsProduction() {
+		p.errs = append(p.errs, errors.New("OTP_EXPOSE_CODE must not be enabled in production"))
 	}
 
 	if err := errors.Join(p.errs...); err != nil {
@@ -92,6 +161,19 @@ func (p *envParser) oneOf(key, def string, allowed ...string) string {
 	return def
 }
 
+func (p *envParser) bool(key string, def bool) bool {
+	raw := p.string(key, "")
+	if raw == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		p.errs = append(p.errs, fmt.Errorf("%s=%q must be true or false", key, raw))
+		return def
+	}
+	return b
+}
+
 func (p *envParser) port(key string, def int) int {
 	raw := p.string(key, "")
 	if raw == "" {
@@ -100,6 +182,54 @@ func (p *envParser) port(key string, def int) int {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 || n > 65535 {
 		p.errs = append(p.errs, fmt.Errorf("%s=%q must be a port number between 1 and 65535", key, raw))
+		return def
+	}
+	return n
+}
+
+// phones parses a comma separated list of phone numbers into E.164.
+func (p *envParser) phones(key string) []string {
+	var out []string
+	for _, raw := range p.list(key) {
+		n, err := validation.NormalizePhone(raw)
+		if err != nil {
+			p.errs = append(p.errs, fmt.Errorf("%s contains an invalid phone number %q", key, raw))
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+const minJWTSecretLen = 32
+
+func (p *envParser) jwtSecret(cfg *Config) {
+	if cfg.JWTSecret == "" {
+		if cfg.AppEnv != EnvDevelopment {
+			p.errs = append(p.errs, errors.New("JWT_SECRET is required when APP_ENV is not development"))
+			return
+		}
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			p.errs = append(p.errs, fmt.Errorf("generate development JWT secret: %w", err))
+			return
+		}
+		cfg.JWTSecret = hex.EncodeToString(b) // tokens stop working on restart
+		return
+	}
+	if len(cfg.JWTSecret) < minJWTSecretLen {
+		p.errs = append(p.errs, fmt.Errorf("JWT_SECRET must be at least %d characters", minJWTSecretLen))
+	}
+}
+
+func (p *envParser) intRange(key string, def, lo, hi int) int {
+	raw := p.string(key, "")
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < lo || n > hi {
+		p.errs = append(p.errs, fmt.Errorf("%s=%q must be a number between %d and %d", key, raw, lo, hi))
 		return def
 	}
 	return n
