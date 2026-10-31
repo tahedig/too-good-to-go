@@ -1,8 +1,5 @@
 package dto
 
-// ErrorResponse is the single error format returned by every endpoint:
-//
-//	{"error": {"code": "NOT_FOUND", "message": "...", "details": ..., "request_id": "..."}}
 type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
 }

@@ -1,6 +1,4 @@
-// Package injector wires the dependency graph by hand. When the graph grows
-// (repositories, services per feature) this can be replaced by google/wire
-// (wire.go + generated wire_gen.go) without touching other layers.
+// Package injector assembles the application dependency graph.
 package injector
 
 import (

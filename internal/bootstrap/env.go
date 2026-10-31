@@ -15,9 +15,6 @@ import (
 	"github.com/tahedig/too-good-to-go/backend/pkg/validation"
 )
 
-// Config holds every environment specific value. It is built only from
-// environment variables (a local .env file is just a convenience that fills
-// variables which are not already set).
 type Config struct {
 	AppEnv string
 
@@ -89,8 +86,8 @@ func (c *Config) IsProduction() bool { return c.AppEnv == EnvProduction }
 // the working directory it is loaded first, but real environment variables
 // always win over values in the file.
 func LoadConfig() (*Config, error) {
-	if err := loadDotEnv(".env"); err != nil {
-		return nil, err
+	if err := godotenv.Load(".env"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("load .env: %w", err)
 	}
 
 	p := &envParser{}
@@ -152,6 +149,9 @@ func (p *envParser) string(key, def string) string {
 
 func (p *envParser) oneOf(key, def string, allowed ...string) string {
 	v := strings.ToLower(p.string(key, def))
+	if v == "" {
+		return def
+	}
 	for _, a := range allowed {
 		if v == a {
 			return v
@@ -260,52 +260,4 @@ func (p *envParser) list(key string) []string {
 		}
 	}
 	return out
-}
-
-// loadDotEnv sets variables from a KEY=VALUE file without overriding variables
-// that already exist. A missing file is not an error.
-func loadDotEnv(path string) error {
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	for lineNo := 1; sc.Scan(); lineNo++ {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-
-		key, value, ok := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if !ok || key == "" {
-			return fmt.Errorf("%s:%d: expected KEY=VALUE", path, lineNo)
-		}
-		value = parseDotEnvValue(strings.TrimSpace(value))
-
-		if _, exists := os.LookupEnv(key); exists {
-			continue
-		}
-		if err := os.Setenv(key, value); err != nil {
-			return fmt.Errorf("%s:%d: %w", path, lineNo, err)
-		}
-	}
-	return sc.Err()
-}
-
-func parseDotEnvValue(v string) string {
-	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-		return v[1 : len(v)-1]
-	}
-	// Strip trailing inline comments on unquoted values: KEY=value # comment
-	if i := strings.Index(v, " #"); i >= 0 {
-		v = strings.TrimSpace(v[:i])
-	}
-	return v
 }
