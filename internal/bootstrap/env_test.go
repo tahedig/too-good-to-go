@@ -27,6 +27,50 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestJWTSecretRules(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, k := range []string{"APP_ENV", "JWT_SECRET", "JWT_ISSUER", "ADMIN_PHONES"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+
+	cfg, err := LoadConfig() // development: an ephemeral secret is generated
+	if err != nil || len(cfg.JWTSecret) < minJWTSecretLen {
+		t.Fatalf("development should get a generated secret, err=%v", err)
+	}
+
+	t.Setenv("APP_ENV", "production")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "JWT_SECRET") {
+		t.Fatalf("production without JWT_SECRET must fail, got %v", err)
+	}
+
+	t.Setenv("JWT_SECRET", "too-short")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "JWT_SECRET") {
+		t.Fatalf("short JWT_SECRET must fail, got %v", err)
+	}
+
+	t.Setenv("JWT_SECRET", strings.Repeat("k", 40))
+	t.Setenv("ADMIN_PHONES", "09121234567, +989129999999")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AdminPhones) != 2 || cfg.AdminPhones[0] != "+989121234567" {
+		t.Fatalf("admin phones not normalized: %v", cfg.AdminPhones)
+	}
+
+	t.Setenv("ADMIN_PHONES", "nope")
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "ADMIN_PHONES") {
+		t.Fatalf("invalid ADMIN_PHONES must fail, got %v", err)
+	}
+	t.Setenv("ADMIN_PHONES", "")
+
+	t.Setenv("JWT_ISSUER", "  ") // blank placeholder from .env.example
+	if cfg, err := LoadConfig(); err != nil || cfg.JWTIssuer != AppName {
+		t.Fatalf("blank JWT_ISSUER should use the default, got %q err=%v", cfg.JWTIssuer, err)
+	}
+}
+
 func TestLoadConfigReportsAllInvalidValues(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("APP_ENV", "prod")
@@ -80,7 +124,8 @@ func TestDotEnvDoesNotOverrideRealEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HTTP_PORT", "7000") // real env wins
+	t.Setenv("HTTP_PORT", "7000")                   // real env wins
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32)) // .env sets APP_ENV=staging
 	os.Unsetenv("LOG_LEVEL")
 	os.Unsetenv("APP_ENV")
 	t.Cleanup(func() { os.Unsetenv("LOG_LEVEL"); os.Unsetenv("APP_ENV") })
