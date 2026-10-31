@@ -18,10 +18,13 @@ import (
 
 func InitializeApp(cfg *bootstrap.Config, log *slog.Logger, version string) (*App, error) {
 	errorHandler := middleware.NewErrorHandler(log)
+	tokenManager := provideTokenManager(cfg)
+	authMiddleware := middleware.NewAuthMiddleware(tokenManager)
 	healthService := provideHealthService(cfg, log, version)
 	healthHandler := handler.NewHealthHandler(healthService)
-	handlers := provideHandlers(healthHandler)
-	engine, err := router.New(cfg, log, errorHandler, handlers)
+	protectedHandler := handler.NewProtectedHandler()
+	handlers := provideHandlers(healthHandler, protectedHandler)
+	engine, err := router.New(cfg, log, errorHandler, authMiddleware, handlers)
 	if err != nil {
 		return nil, err
 	}

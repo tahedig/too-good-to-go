@@ -16,8 +16,11 @@ import (
 func InitializeApp(cfg *bootstrap.Config, log *slog.Logger, version string) (*App, error) {
 	wire.Build(
 		provideHealthService,
+		provideTokenManager,
 		handler.NewHealthHandler,
+		handler.NewProtectedHandler,
 		middleware.NewErrorHandler,
+		middleware.NewAuthMiddleware,
 		provideHandlers,
 		router.New,
 		newApp,
