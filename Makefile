@@ -2,7 +2,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 SWAG_VERSION := v1.16.4
 
-.PHONY: help run build test race cover fmt fmt-check vet tidy swagger check docker
+.PHONY: help run build test race cover fmt fmt-check vet tidy wire swagger check docker
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -34,6 +34,9 @@ vet: ## Run go vet
 
 tidy: ## Sync go.mod and go.sum
 	go mod tidy
+
+wire: ## Regenerate internal/injector/wire_gen.go after changing providers
+	go generate ./internal/injector
 
 swagger: ## Regenerate docs/ from the handler annotations
 	go run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -d ./ -o docs --parseInternal

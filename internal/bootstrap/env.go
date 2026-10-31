@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 
 	"github.com/tahedig/too-good-to-go/backend/pkg/validation"
 )
@@ -140,9 +141,11 @@ type envParser struct {
 	errs []error
 }
 
+// string returns def when the variable is unset or blank, so the empty
+// placeholders copied from .env.example mean "use the default".
 func (p *envParser) string(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok {
-		return strings.TrimSpace(v)
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
 	}
 	return def
 }

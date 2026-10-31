@@ -1,4 +1,6 @@
-// Package injector assembles the application dependency graph.
+// Package injector assembles the application dependency graph. The providers
+// live here; wire.go lists them and `go generate ./internal/injector`
+// regenerates wire_gen.go.
 package injector
 
 import (
@@ -17,16 +19,17 @@ import (
 	redisrepo "github.com/tahedig/too-good-to-go/backend/internal/infrastructure/repository/redis"
 	"github.com/tahedig/too-good-to-go/backend/internal/infrastructure/sms"
 	"github.com/tahedig/too-good-to-go/backend/internal/infrastructure/token"
-	"github.com/tahedig/too-good-to-go/backend/internal/presentation/handler"
-	"github.com/tahedig/too-good-to-go/backend/internal/presentation/middleware"
+	handlerinterface "github.com/tahedig/too-good-to-go/backend/internal/presentation/handler/interface"
 	"github.com/tahedig/too-good-to-go/backend/internal/presentation/router"
 )
 
 type App struct {
 	Router *gin.Engine
 	Health serviceinterface.HealthService
-	// Close releases external connections; call it after the HTTP server stopped.
-	Close func() error
+}
+
+func newApp(r *gin.Engine, health serviceinterface.HealthService) *App {
+	return &App{Router: r, Health: health}
 }
 
 // storage is everything that moves from memory to Redis when REDIS_URL is set.
@@ -34,56 +37,69 @@ type storage struct {
 	otps     repository.OTPRepository
 	limiter  serviceinterface.RateLimiter
 	checkers []serviceinterface.HealthChecker
-	close    func() error
 }
 
 const redisConnectTimeout = 5 * time.Second
 
-func newStorage(cfg *bootstrap.Config, log *slog.Logger) (*storage, error) {
+// provideStorage connects to Redis, or falls back to memory when REDIS_URL is
+// empty (bootstrap only allows that in development). The returned cleanup
+// closes the connection; Wire calls it if a later provider fails, and main
+// calls it after the HTTP server stopped.
+func provideStorage(cfg *bootstrap.Config, log *slog.Logger) (*storage, func(), error) {
 	if cfg.RedisURL == "" {
-		// bootstrap only allows this in development.
 		log.Warn("REDIS_URL is not set: OTPs and rate limits are kept in memory, are lost on restart and are not shared between instances")
 		return &storage{
 			otps:    memory.NewOTPRepository(),
 			limiter: memory.NewRateLimiter(),
-			close:   func() error { return nil },
-		}, nil
+		}, func() {}, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), redisConnectTimeout)
 	defer cancel()
 	client, err := redisrepo.NewClient(ctx, cfg.RedisURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	log.Info("connected to redis", "addr", client.Options().Addr, "db", client.Options().DB)
+
+	cleanup := func() {
+		if err := client.Close(); err != nil {
+			log.Warn("closing redis failed", "error", err.Error())
+		}
+	}
 	return &storage{
 		otps:     redisrepo.NewOTPRepository(client, cfg.RedisKeyPrefix),
 		limiter:  redisrepo.NewRateLimiter(client, cfg.RedisKeyPrefix),
 		checkers: []serviceinterface.HealthChecker{redisrepo.NewHealthChecker(client)},
-		close:    client.Close,
-	}, nil
+	}, cleanup, nil
 }
 
-func newSMSSender(cfg *bootstrap.Config, log *slog.Logger) serviceinterface.SMSSender {
+func provideRateLimiter(store *storage) serviceinterface.RateLimiter { return store.limiter }
+
+func provideHealthService(cfg *bootstrap.Config, log *slog.Logger, version string, store *storage) serviceinterface.HealthService {
+	return service.NewHealthService(version, cfg.HealthCheckTimeout, log, store.checkers...)
+}
+
+func provideSMSSender(cfg *bootstrap.Config, log *slog.Logger) serviceinterface.SMSSender {
 	switch cfg.SMSProvider {
 	// Add real providers here (e.g. case bootstrap.SMSProviderFerzz). The
-	// value is validated in bootstrap, so the default is unreachable.
+	// value is validated in bootstrap, so the default is the fake sender.
 	default:
 		return sms.NewFakeSender(log, !cfg.IsProduction())
 	}
 }
 
-func InitializeApp(cfg *bootstrap.Config, log *slog.Logger, version string) (*App, error) {
-	store, err := newStorage(cfg, log)
-	if err != nil {
-		return nil, err
-	}
+func provideTokenManager(cfg *bootstrap.Config) serviceinterface.TokenManager {
+	return token.NewJWTManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAccessTTL)
+}
 
-	healthService := service.NewHealthService(version, cfg.HealthCheckTimeout, log, store.checkers...)
-	smsSender := newSMSSender(cfg, log)
-	tokens := token.NewJWTManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAccessTTL)
-
+func provideAuthService(
+	cfg *bootstrap.Config,
+	log *slog.Logger,
+	store *storage,
+	smsSender serviceinterface.SMSSender,
+	tokens serviceinterface.TokenManager,
+) serviceinterface.AuthService {
 	phoneRoles := make(map[string]enum.Role)
 	for _, p := range cfg.VendorPhones {
 		phoneRoles[p] = enum.RoleVendor
@@ -92,7 +108,7 @@ func InitializeApp(cfg *bootstrap.Config, log *slog.Logger, version string) (*Ap
 		phoneRoles[p] = enum.RoleAdmin
 	}
 
-	authService := service.NewAuthService(
+	return service.NewAuthService(
 		// Users stay in memory until the Postgres repository exists.
 		store.otps, memory.NewUserRepository(), smsSender, tokens,
 		service.OTPConfig{
@@ -103,16 +119,12 @@ func InitializeApp(cfg *bootstrap.Config, log *slog.Logger, version string) (*Ap
 			ExposeCode:     cfg.OTPExposeCode,
 		},
 		phoneRoles, log)
+}
 
-	r, err := router.New(cfg, log, middleware.NewErrorHandler(log), middleware.NewAuthMiddleware(tokens), store.limiter, router.Handlers{
-		Health:    handler.NewHealthHandler(healthService),
-		Auth:      handler.NewAuthHandler(authService),
-		Protected: handler.NewProtectedHandler(),
-	})
-	if err != nil {
-		_ = store.close()
-		return nil, err
-	}
-
-	return &App{Router: r, Health: healthService, Close: store.close}, nil
+func provideHandlers(
+	health handlerinterface.HealthHandler,
+	auth handlerinterface.AuthHandler,
+	protected handlerinterface.ProtectedHandler,
+) router.Handlers {
+	return router.Handlers{Health: health, Auth: auth, Protected: protected}
 }

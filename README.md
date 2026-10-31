@@ -254,6 +254,7 @@ make test        # go test ./...
 make check       # gofmt check + go vet + tests with -race (what CI runs)
 make build       # bin/api with a version stamp from git
 make swagger     # regenerate the Swagger spec in docs/
+make wire        # regenerate internal/injector/wire_gen.go
 make docker      # build the container image
 ```
 

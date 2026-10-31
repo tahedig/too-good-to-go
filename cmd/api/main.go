@@ -52,16 +52,12 @@ func run() error {
 	)
 	slog.SetDefault(log)
 
-	app, err := injector.InitializeApp(cfg, log, version)
+	app, cleanup, err := injector.InitializeApp(cfg, log, version)
 	if err != nil {
 		return err
 	}
 	// Runs after srv.Shutdown below, once no request can use the connections.
-	defer func() {
-		if err := app.Close(); err != nil {
-			log.Warn("closing dependencies failed", "error", err.Error())
-		}
-	}()
+	defer cleanup()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
